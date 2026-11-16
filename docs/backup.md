@@ -44,6 +44,84 @@ Each start, success or failure, and download is recorded in the activity log (mo
 - A backup left `RUNNING` by a restart is marked `FAILED` at the next startup.
 - Each step has a timeout: dump 15 min, check 5 min, upload 10 min.
 
+## Readable data export (ZIP of CSV files)
+
+The Backups page has a second, separate tool: **Create Readable Export**. It makes a ZIP that someone can open in Excel to look at the actual records, with no database tools.
+
+> **A readable export is NOT a backup.** It can't restore the CRM: it has no schema, constraints, sequences or migration history, and some columns are deliberately withheld. Only the `.dump` restores the CRM (see the restore runbook below). The two are labelled separately in the UI, the API (`kind`), the file names and the README inside the ZIP.
+
+### What the ZIP contains
+
+`crm-readable-export-YYYYMMDDTHHMMSSZ-<id>.zip` holds one folder with the same name, containing:
+
+| File | Contents |
+|---|---|
+| `README.txt` | says it is not a backup, how to open it, how records are linked, every withheld column and excluded table with its reason, and a confidentiality note |
+| `manifest.json` | `"restorable": false`, export id, UTC time, snapshot, database and CRM schema version, and for every table its file, row count, columns, withheld columns with reasons, the number of formula-guarded cells and the SHA-256 |
+| `relationships.csv` | every link between tables: `table, column, refers_to_table, refers_to_column, enforced_by_database, name_column_in_export`. Foreign keys come from the database catalog (`yes`); links without a database constraint come from the export policy (`no (logical link, ...)`) |
+| `tables/<table>.csv` | one file per exported table, all columns, ordered by primary key |
+
+CSV format:
+- UTF-8 with a byte order mark (so Excel shows accents and other scripts correctly), comma-separated, CRLF line endings, RFC 4180 quoting.
+- NULL is an empty field, and an empty text is `""`.
+- Dates are `YYYY-MM-DD`. Date/times are `YYYY-MM-DD HH:MM:SS[.ffffff]`, exactly as stored (no time zone; the server's zone is named in the README).
+- Numbers are plain, never `1E+6`.
+- **Name columns:** next to an id that points to another table there is a readable name, for example `assigned_employee_id` plus `assigned_employee__name`, or `lead_id` plus `lead__company_name`. These come from a `LEFT JOIN` on the referenced id, and the row count is checked, so they can't add or drop rows.
+- **Formula-injection guard:** a text value that a spreadsheet would run as a formula gets a leading `'`. That means it starts with `=`, `@`, tab or CR, or with `+` / `-` and is not a plain number or phone number. Phone numbers such as `+91 98765 43210` and numbers such as `-12.5` stay unchanged.
+
+### How it is made
+
+1. `POST /api/admin/backups/readable` (ADMIN only) returns **202**. The job uses the same single background thread, the same "one job at a time" lock (409 while a dump **or** an export runs), the same `db_backup` history (`kind = READABLE_EXPORT`), the same private bucket and the same audit as the dump.
+2. `JdbcReadableExporter` reads through the application's own datasource on **one connection, in one `REPEATABLE READ, READ ONLY` transaction**. On PostgreSQL both settings are read back from the server (`current_setting`) before any data is read, and the export stops if either is wrong.
+3. The schema is discovered from the database itself, because the core tables are created by Hibernate, not by migrations. It is then checked against the export policy **before anything is written** (see below).
+4. Each table is streamed with a forward-only cursor (fetch size 500) into the ZIP on the server's temporary disk, so memory use doesn't grow with the data. The row count from the same snapshot must equal the rows written.
+5. **Size limit:** the ZIP is counted while it is written. Once it goes past `crm.backup.readable-max-mb` (default **50 MB**, the Supabase Free plan's per-file limit), the export stops: the row becomes **FAILED**, nothing is uploaded and the temp file is deleted. If you raise the limit, raise the bucket's file size limit too.
+6. **Independent check** (`ReadableExportVerifier`), reading the finished ZIP back from disk:
+   - exactly the expected files, with safe names;
+   - each file's SHA-256 is unchanged;
+   - every CSV has the BOM, parses, has the expected header, the snapshot's row count and the same number of fields in every record;
+   - the manifest matches and says `restorable: false`, and the README says "NOT A DATABASE BACKUP";
+   - `employees` has at least one row (so real data was read, not just a schema);
+   - no bcrypt password hash appears anywhere.
+7. Only then is the ZIP uploaded (`x-upsert: false`). After the upload the row becomes **SUCCEEDED**, with size, SHA-256, table count and total rows, and readable retention runs.
+8. Time limit: `crm.backup.readable-timeout` (default 15 min) for the whole export, also used as the per-statement query timeout.
+9. **Download** uses the same endpoint as the dump: `GET /api/admin/backups/{id}/download` with `Content-Type: application/zip` and `no-store`. There is no public or pre-signed URL, and the browser checks size and SHA-256 before saving.
+
+Activity log actions: `READABLE_EXPORT_STARTED`, `_SUCCEEDED`, `_FAILED`, `_DOWNLOADED` (module `SYSTEM`).
+
+### Export policy: what is included, withheld or excluded
+
+`ReadableExportPolicies.crm()` holds an explicit decision for **every table and every column**, and it **fails closed**:
+- A table that is not in the policy, or a column of an exported table that is not in it, stops the export before anything is written. The failure message names each missing `table` / `table.column` (only names, never values).
+- A **withheld** column stays in the CSV, but every non-empty value reads `[withheld]`, and an empty one stays empty. The query only asks `CASE WHEN col IS NULL ...`, so the value is never read from the database.
+- A column whose name looks like a credential (password, token, secret, verifier, API key, nonce, ...) **cannot** be marked as included; building the policy fails.
+
+| Decision | Tables / columns | Why |
+|---|---|---|
+| **Included in full** | leads, opportunities, customers, follow-ups, products and other lookups, employees (name, e-mail, phone, role, manager), activity log, documents (rows only), e-mail and WhatsApp templates, batches and send logs, suppression and consent **status** | business records for authorised administrators; contact details included in full as approved |
+| **Withheld** | `employees.password` | password hash (login credential) |
+| | `email_mailbox_account.refresh_token_encrypted` | encrypted OAuth refresh token |
+| | `email_mailbox_account.provider_subject`, `.provider_tenant_id` | identifiers that bind a mailbox to its Google/Microsoft sign-in |
+| | `whatsapp_consent.evidence`, `whatsapp_consent_audit.evidence` | free-text consent evidence; reviewed and withheld by default as sensitive personal data |
+| | `email_suppression.note`, `email_suppression_audit.note` | free-text opt-out notes; same reason |
+| **Excluded** | `email_oauth_state` | OAuth sign-in state (state hash, PKCE verifier, nonce) |
+| | `flyway_schema_history` | migration bookkeeping (the version is in `manifest.json`) |
+| | `db_backup` | backup/export history, not CRM data |
+
+WAHA's API key, JWT secret, Supabase key and mail OAuth client secrets are configuration (environment variables), not data, so they are never in the database or in an export.
+
+To export consent evidence or opt-out notes later, change `withhold(...)` to `include(...)` for that column in `ReadableExportPolicies` and update this table. **When the schema changes** (a new entity field or migration), add a decision for the new table or column. `ReadableExportPolicyCoverageTest` (entity schema) and `ReadableExportPostgresTest` (migrated PostgreSQL schema) fail until you do.
+
+### Retention (separate from the dumps)
+
+| | Full backups (`.dump`) | Readable exports (`.zip`) |
+|---|---|---|
+| Keep | newest **14** successful (`CRM_BACKUP_RETAIN`) | newest **5** successful (`CRM_BACKUP_READABLE_RETAIN`) **and** none older than **30 days** (`CRM_BACKUP_READABLE_MAX_AGE`, e.g. `30d`) |
+| Runs | after each successful dump | after each successful export, and every 6 h on the backup thread (`CRM_BACKUP_READABLE_CLEANUP_INTERVAL`, first run 5 min after start) |
+| Download after expiry | - | refused (409 "expired") even if the cleanup hasn't run yet |
+
+Each retention query is filtered by `kind`, so a readable export never counts toward, or causes the deletion of, a `.dump`, and the reverse is also true. History rows stay; only the files are deleted.
+
 ## One-time setup
 
 1. **Create the bucket.** In the Supabase dashboard go to Storage → New bucket. Name it `crm-backups` and leave **Public bucket OFF**. Don't add any storage policies: the backend uses the service-role key, and nobody else needs access.
@@ -60,6 +138,10 @@ Each start, success or failure, and download is recorded in the activity log (mo
    | `CRM_BACKUP_DUMP_TIMEOUT` | no | default `15m` |
    | `CRM_BACKUP_MIN_FREE_MB` | no | default `256` |
    | `CRM_BACKUP_SSL_MODE` | no | default: the JDBC URL's `sslmode`, otherwise `require` |
+   | `CRM_BACKUP_READABLE_RETAIN` | no | readable exports kept, default `5` |
+   | `CRM_BACKUP_READABLE_MAX_AGE` | no | maximum age of a readable export, default `30d` |
+   | `CRM_BACKUP_READABLE_MAX_MB` | no | largest readable export stored, default `50` (keep ≤ the bucket's file size limit) |
+   | `CRM_BACKUP_READABLE_TIMEOUT` | no | time limit for one readable export, default `15m` |
 
    Without `SUPABASE_URL` and the key, the CRM still starts normally. **Take Backup** then answers 503: "Backups are not configured on this server".
 3. **PostgreSQL client version.**
@@ -77,6 +159,12 @@ Each start, success or failure, and download is recorded in the activity log (mo
      SELECT version, description, success FROM flyway_schema_history ORDER BY installed_rank DESC LIMIT 5;
      ```
      Expect the newest `version` to be `14.1` or lower, all with `success = true`.
+   - `V20__db_backup_kind.sql` (readable exports) is purely additive and can be re-run:
+     - it adds `db_backup.kind` (`NOT NULL DEFAULT 'DUMP'`, so every existing row becomes a dump, unchanged) and `total_rows`;
+     - it adds the check constraint `chk_db_backup_kind` and the index `idx_db_backup_kind_started_at`;
+     - `uq_db_backup_one_running` still allows one running job of either kind.
+
+     `DbBackupKindMigrationPostgresTest` checks all of this on a database with existing backup history.
 
 ## Restore runbook
 
@@ -125,7 +213,14 @@ Never restore over the production database without a fresh backup of the current
 | `SecretScrubberTest`, `PostgresTargetTest` | secrets never in messages; only plain single-host PostgreSQL URLs accepted |
 | `SupabaseBackupStorageTest` | private upload (`x-upsert: false`), streamed download, status-only errors, key validation |
 | `BackupPostgresRoundTripTest` | **restore verification**: real migrations and seed data, then real `pg_dump`, the server's own check, rejection of a truncated archive, schema drop, `pg_restore`, and a row-for-row comparison of every table, Flyway validation and working sequences |
-| frontend `Backups.test.jsx`, `backupService.test.js` | button, disabled while running, polling, success / failure / 409 / 403 messages, disclosure text, size and checksum check before saving |
+| frontend `Backups.test.jsx`, `backupService.test.js` | button, disabled while running, polling, success / failure / 409 / 403 messages, disclosure text, size and checksum check before saving; the two separate sections (full backup vs readable export), per-kind history, both buttons disabled while either job runs, export success / failure messages, `.zip` download |
+| `ReadableExportApiTest` | readable export over HTTP with the **real exporter and verifier** on H2: ADMIN only (401 / 403 for start, list and download); the uploaded ZIP opened and checked (README / manifest / relationships, real rows, `[withheld]` password and token, formula guard, exact phone numbers, name columns, no hash / token / OAuth nonce anywhere, excluded tables absent); `application/zip` download and audit; per-kind history; one job at a time across kinds; failed upload, failed check and unexpected errors; **retention isolation** in both directions; 30-day expiry and refused download |
+| `ReadableExportLimitsTest` | size limit stops the export while writing (FAILED, nothing uploaded, no temp file); unreviewed table / column stops it before any file is written; time limit; low disk space; a truncated ZIP fails the check |
+| `ReadableExportPolicyTest`, `ReadableExportPolicyCoverageTest`, `CsvWriterTest` | the reviewed decisions (credentials withheld, consent evidence withheld, contact details included); fail-closed rules; every entity table and column covered; CSV quoting, NULL vs empty, Unicode, formula guard, reader round trip |
+| `ReadableExportPostgresTest` | on a disposable PostgreSQL built like production (baseline, Flyway V2–V20, Hibernate update): full policy coverage, snapshot checked on the server, every table exported or excluded with exact row counts, real values and formats, real foreign keys plus logical links, no secrets, and the whole `BackupService` job (V20 kind, upload, SUCCEEDED). DESTRUCTIVE, guarded like the restore test |
+| `DbBackupKindMigrationPostgresTest` | V20 on a database with existing backup history: rows become `DUMP` unchanged, constraint, one running job of either kind, re-runnable. DESTRUCTIVE, guarded like the restore test |
+
+The three PostgreSQL classes (`BackupPostgresRoundTripTest`, `ReadableExportPostgresTest`, `DbBackupKindMigrationPostgresTest`) each need their **own fresh** `*_restore_test` database, because the guard requires an empty public schema. Run them one class at a time, following the procedure below and substituting the class name.
 
 ### Running the restore test (Windows PowerShell)
 

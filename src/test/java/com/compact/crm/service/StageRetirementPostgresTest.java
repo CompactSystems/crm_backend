@@ -17,7 +17,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * The startup stage retirements (NewStageRetirement, LegacyStageRetirement)
- * on a real PostgreSQL migrated by Flyway (V2..V19), with the real bulk
+ * on a real PostgreSQL migrated by Flyway (V2..V20), with the real bulk
  * updates. Existing data is inserted by SQL the way an older installation
  * holds it. Same gating and warning as the other PostgreSQL tests:
  * CRM_TEST_PG_URL, and the public schema is DROPPED - point it at a
@@ -76,7 +76,7 @@ class StageRetirementPostgresTest {
     void everyOpportunityEndsInAMainStage_withProvenanceAndHistory_andNothingElseChanges() {
 
         // The app has started: Flyway ran and the seeder created the five main stages.
-        assertThat(one("SELECT version FROM flyway_schema_history WHERE success ORDER BY installed_rank DESC LIMIT 1")).isEqualTo("19");
+        assertThat(one("SELECT version FROM flyway_schema_history WHERE success ORDER BY installed_rank DESC LIMIT 1")).isEqualTo("20");
 
         jdbc.execute("INSERT INTO employees (id, name, email, phone, password, role_id) "
                 + "SELECT 9900, 'Ret', 'ret@pg.test', '9123400099', 'x', id FROM roles WHERE name = 'EMPLOYEE'");

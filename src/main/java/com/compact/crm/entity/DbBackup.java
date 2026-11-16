@@ -1,5 +1,6 @@
 package com.compact.crm.entity;
 
+import com.compact.crm.enums.BackupKind;
 import com.compact.crm.enums.BackupStatus;
 import jakarta.persistence.*;
 import lombok.*;
@@ -23,6 +24,13 @@ public class DbBackup {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
+
+    // DUMP (restorable .dump) or READABLE_EXPORT (ZIP of CSV files), V20.
+    // Rows written before V20 are DUMP.
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 20)
+    @Builder.Default
+    private BackupKind kind = BackupKind.DUMP;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
@@ -52,6 +60,10 @@ public class DbBackup {
 
     @Column(name = "table_count")
     private Integer tableCount;
+
+    // Rows written to a readable export; NULL for a dump.
+    @Column(name = "total_rows")
+    private Long totalRows;
 
     @Column(name = "server_version", length = 60)
     private String serverVersion;

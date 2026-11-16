@@ -69,5 +69,12 @@ public enum ActivityAction {
     BACKUP_STARTED,
     BACKUP_SUCCEEDED,
     BACKUP_FAILED,
-    BACKUP_DOWNLOADED
+    BACKUP_DOWNLOADED,
+
+    // Readable data exports (ZIP of CSV files, ADMIN only, not a restorable
+    // backup) - same module and service as the backups above.
+    READABLE_EXPORT_STARTED,
+    READABLE_EXPORT_SUCCEEDED,
+    READABLE_EXPORT_FAILED,
+    READABLE_EXPORT_DOWNLOADED
 }

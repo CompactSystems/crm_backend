@@ -5,6 +5,8 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+import javax.sql.DataSource;
+import java.time.Clock;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -36,6 +38,23 @@ public class BackupConfig {
             @Value("${crm.backup.supabase-service-role-key:${SUPABASE_SERVICE_ROLE_KEY:}}") String serviceRoleKey,
             BackupProperties properties) {
         return new SupabaseBackupStorage(supabaseUrl, serviceRoleKey, properties.getBucket(), properties.getUploadTimeout());
+    }
+
+    // Readable exports read through the application's own datasource (one
+    // pooled connection in a read-only snapshot), not through pg_dump.
+    @Bean
+    public ReadableExportPolicy readableExportPolicy() {
+        return ReadableExportPolicies.crm();
+    }
+
+    @Bean
+    public ReadableExporter readableExporter(DataSource dataSource, BackupProperties properties, ReadableExportPolicy policy) {
+        return new JdbcReadableExporter(dataSource, properties, policy, Clock.systemUTC());
+    }
+
+    @Bean
+    public ReadableExportVerifier readableExportVerifier() {
+        return new ReadableExportVerifier();
     }
 
     @Bean

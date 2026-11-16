@@ -49,4 +49,26 @@ public class BackupProperties {
 
     // Tables whose data must be in the archive for it to count as complete.
     private List<String> requiredTables = List.of("employees", "flyway_schema_history");
+
+    // ---- readable exports (ZIP of CSV files; NOT a restorable backup) -----
+    // Completely separate from the .dump retention above: keep at most the
+    // newest readableRetain successful exports, and none older than readableMaxAge.
+
+    private int readableRetain = 5;
+
+    private Duration readableMaxAge = Duration.ofDays(30);
+
+    // Largest ZIP that may be stored. The Supabase Free plan accepts at most
+    // 50 MB per file; an export that grows past this is stopped while it is
+    // being written and recorded as FAILED - nothing is uploaded.
+    private long readableMaxMb = 50;
+
+    // The whole export (all tables) must finish within this time.
+    private Duration readableTimeout = Duration.ofMinutes(15);
+
+    // How often expired readable exports are deleted even when no new export is made.
+    private Duration readableCleanupInterval = Duration.ofHours(6);
+
+    // Tables that must exist and be exported for the export to count as complete.
+    private List<String> readableRequiredTables = List.of("employees", "leads", "opportunities", "customers", "followups");
 }
