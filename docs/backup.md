@@ -104,6 +104,7 @@ Activity log actions: `READABLE_EXPORT_STARTED`, `_SUCCEEDED`, `_FAILED`, `_DOWN
 | | `email_mailbox_account.provider_subject`, `.provider_tenant_id` | identifiers that bind a mailbox to its Google/Microsoft sign-in |
 | | `whatsapp_consent.evidence`, `whatsapp_consent_audit.evidence` | free-text consent evidence; reviewed and withheld by default as sensitive personal data |
 | | `email_suppression.note`, `email_suppression_audit.note` | free-text opt-out notes; same reason |
+| **Included (legacy)** | `leads.website`, `.interested_product`, `.lead_source`, `.product_id` (with `product__name`); `opportunities.sales_stage`; `followups.activity_type`, `.custom_activity_type` | columns that **older versions of the entities** created and that only exist in older databases such as production (see below). They hold the website URL, free-text product interest, source / stage / activity enum labels and the old single-product link of records created before the current fields existed. None is a credential or a personal note |
 | **Excluded** | `email_oauth_state` | OAuth sign-in state (state hash, PKCE verifier, nonce) |
 | | `flyway_schema_history` | migration bookkeeping (the version is in `manifest.json`) |
 | | `db_backup` | backup/export history, not CRM data |
@@ -111,6 +112,23 @@ Activity log actions: `READABLE_EXPORT_STARTED`, `_SUCCEEDED`, `_FAILED`, `_DOWN
 WAHA's API key, JWT secret, Supabase key and mail OAuth client secrets are configuration (environment variables), not data, so they are never in the database or in an export.
 
 To export consent evidence or opt-out notes later, change `withhold(...)` to `include(...)` for that column in `ReadableExportPolicies` and update this table. **When the schema changes** (a new entity field or migration), add a decision for the new table or column. `ReadableExportPolicyCoverageTest` (entity schema) and `ReadableExportPostgresTest` (migrated PostgreSQL schema) fail until you do.
+
+#### Legacy columns: the tests can't see everything production has
+
+`spring.jpa.hibernate.ddl-auto=update` adds columns but **never drops them**. So when an entity field is renamed or replaced (for example `Lead.leadSource` enum → `lead_source_id`, `FollowUp.activityType` enum → `activity_type_id`), the old column stays in the deployed database with its old data. No current entity, migration or test schema mentions it.
+
+The first deployed export (16 Nov 2026) stopped for exactly this reason. It found 7 such columns (`ReadableExportPolicies.LEGACY_COLUMNS`), which now have reviewed decisions. `ReadableExportPostgresTest` recreates them on its production-shaped schema, and `ReadableExportLegacyColumnsTest` recreates them on H2.
+
+That failure is the policy working as designed: an unknown column stops the export before anything is written. Don't bypass it. If the export reports more unreviewed columns:
+1. List the deployed schema, read-only (for example in the Supabase SQL editor). This shows column names and types only, no data:
+   ```sql
+   SELECT table_name, column_name, data_type
+   FROM information_schema.columns
+   WHERE table_schema = 'public'
+   ORDER BY table_name, ordinal_position;
+   ```
+2. For each reported column, find what it holds: `git log -S <field name>` on the entities, or the older code. Decide whether to include, withhold or exclude it.
+3. Add the decision to `ReadableExportPolicies`, plus `LEGACY_COLUMNS` and the setup in `ReadableExportPostgresTest` if it's a leftover. Then update the table above and run the tests.
 
 ### Retention (separate from the dumps)
 
@@ -217,7 +235,8 @@ Never restore over the production database without a fresh backup of the current
 | `ReadableExportApiTest` | readable export over HTTP with the **real exporter and verifier** on H2: ADMIN only (401 / 403 for start, list and download); the uploaded ZIP opened and checked (README / manifest / relationships, real rows, `[withheld]` password and token, formula guard, exact phone numbers, name columns, no hash / token / OAuth nonce anywhere, excluded tables absent); `application/zip` download and audit; per-kind history; one job at a time across kinds; failed upload, failed check and unexpected errors; **retention isolation** in both directions; 30-day expiry and refused download |
 | `ReadableExportLimitsTest` | size limit stops the export while writing (FAILED, nothing uploaded, no temp file); unreviewed table / column stops it before any file is written; time limit; low disk space; a truncated ZIP fails the check |
 | `ReadableExportPolicyTest`, `ReadableExportPolicyCoverageTest`, `CsvWriterTest` | the reviewed decisions (credentials withheld, consent evidence withheld, contact details included); fail-closed rules; every entity table and column covered; CSV quoting, NULL vs empty, Unicode, formula guard, reader round trip |
-| `ReadableExportPostgresTest` | on a disposable PostgreSQL built like production (baseline, Flyway V2–V20, Hibernate update): full policy coverage, snapshot checked on the server, every table exported or excluded with exact row counts, real values and formats, real foreign keys plus logical links, no secrets, and the whole `BackupService` job (V20 kind, upload, SUCCEEDED). DESTRUCTIVE, guarded like the restore test |
+| `ReadableExportLegacyColumnsTest` | the 7 legacy production columns added to H2: the real export and check succeed, values exported as stored, `product__name` for the old `product_id`, formula guard on legacy free text, password still withheld; one more unreviewed column still stops the export before any file is written |
+| `ReadableExportPostgresTest` | on a disposable PostgreSQL built like production (baseline plus the legacy columns, Flyway V2–V20, Hibernate update): full policy coverage, legacy values and the enforced `leads.product_id` foreign key, an unreviewed column still stopping the export, snapshot checked on the server, every table exported or excluded with exact row counts, real values and formats, real foreign keys plus logical links, no secrets, and the whole `BackupService` job (V20 kind, upload, SUCCEEDED). DESTRUCTIVE, guarded like the restore test |
 | `DbBackupKindMigrationPostgresTest` | V20 on a database with existing backup history: rows become `DUMP` unchanged, constraint, one running job of either kind, re-runnable. DESTRUCTIVE, guarded like the restore test |
 
 The three PostgreSQL classes (`BackupPostgresRoundTripTest`, `ReadableExportPostgresTest`, `DbBackupKindMigrationPostgresTest`) each need their **own fresh** `*_restore_test` database, because the guard requires an empty public schema. Run them one class at a time, following the procedure below and substituting the class name.

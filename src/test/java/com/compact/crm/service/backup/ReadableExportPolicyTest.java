@@ -73,6 +73,40 @@ class ReadableExportPolicyTest {
                 .containsExactlyInAnyOrder("email_oauth_state", "flyway_schema_history", "db_backup");
     }
 
+    // ---- legacy production columns (deployed export, 2026-11-16) ------------
+
+    @Test
+    void theSevenLegacyProductionColumns_haveExplicitReviewedDecisions() {
+        assertThat(ReadableExportPolicies.LEGACY_COLUMNS).containsExactlyInAnyOrder(
+                "followups.activity_type", "followups.custom_activity_type", "leads.interested_product",
+                "leads.lead_source", "leads.website", "leads.product_id", "opportunities.sales_stage");
+
+        for (String tc : ReadableExportPolicies.LEGACY_COLUMNS) {
+            String[] p = tc.split("\\.");
+            assertThat(column(p[0], p[1])).as(tc).isNotNull();
+            assertThat(column(p[0], p[1]).treatment()).as(tc).isEqualTo(ReadableExportPolicy.Treatment.INCLUDE);
+        }
+        // the old single-product reference keeps a readable product name
+        assertThat(CRM.table("leads").orElseThrow().logicalReferences()).containsEntry("product_id", "products");
+    }
+
+    @Test
+    void theDeployedSchemaWithItsLegacyColumns_isFullyReviewed_butAnyFurtherColumnStillStopsTheExport() {
+        // exactly what the deployed export reported as missing, plus the current columns
+        Map<String, List<String>> production = new java.util.TreeMap<>();
+        for (String table : List.of("leads", "opportunities", "followups")) {
+            production.put(table, new java.util.ArrayList<>(CRM.table(table).orElseThrow().columns().keySet()));
+        }
+        assertThat(production.get("leads")).contains("website", "interested_product", "lead_source", "product_id");
+        assertThat(CRM.unreviewed(production)).isEmpty();
+
+        production.get("leads").add("some_future_column");
+        production.get("followups").add("another_legacy_column");
+        production.put("unknown_table", List.of("id"));
+        assertThat(CRM.unreviewed(production))
+                .containsExactly("followups.another_legacy_column", "leads.some_future_column", "unknown_table");
+    }
+
     // ---- fail-closed rules -------------------------------------------------
 
     @Test

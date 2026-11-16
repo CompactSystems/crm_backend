@@ -20,12 +20,31 @@ package com.compact.crm.service.backup;
 //    docs/backup.md).
 //  - Bookkeeping that is not CRM data is EXCLUDED: Flyway's migration history
 //    (its latest version is in manifest.json) and the backup/export history.
+//  - LEGACY columns: Hibernate ddl-auto=update adds columns but never drops
+//    them, so the production database still has columns that older versions
+//    of the entities created and that no current entity or migration mentions
+//    (LEGACY_COLUMNS below). They hold the data of records made before the
+//    current fields existed, so each has an explicit, reviewed decision like
+//    any other column. None of them is a credential or personal note.
 public final class ReadableExportPolicies {
 
     private ReadableExportPolicies() {
     }
 
-
+    // Legacy columns known to exist in production (reported by the deployed
+    // export on 2026-11-16), with what the older code stored in them:
+    //   leads.website                 String: the company's website URL
+    //   leads.interested_product      String: free-text product name(s), before lead_products
+    //   leads.lead_source             enum LeadSource label (INDIA_MART, WEBSITE, ...), before lead_source_id
+    //   leads.product_id              id of a products row (one product per lead), before lead_products
+    //   opportunities.sales_stage     enum SalesStage label (NEW, QUOTATION_SENT, ...), before sales_stage_id
+    //   followups.activity_type       enum ActivityType label (CALL, VISIT, ..., OTHER), before activity_type_id
+    //   followups.custom_activity_type  short free-text activity label typed when OTHER was chosen
+    // All are INCLUDED: they are ordinary business values of old records.
+    // ReadableExportPostgresTest recreates them on a production-shaped schema.
+    static final java.util.List<String> LEGACY_COLUMNS = java.util.List.of(
+            "leads.website", "leads.interested_product", "leads.lead_source", "leads.product_id",
+            "opportunities.sales_stage", "followups.activity_type", "followups.custom_activity_type");
 
     public static ReadableExportPolicy crm() {
 
@@ -76,6 +95,9 @@ public final class ReadableExportPolicies {
                         "other_industry_detail", "description", "lead_status", "lead_validity", "lead_source_id",
                         "assigned_employee_id", "final_remarks", "invalid_reason", "contact_deadline", "closed_at",
                         "created_at", "updated_at")
+                // legacy (see LEGACY_COLUMNS): business values of older leads
+                .include("website", "interested_product", "lead_source", "product_id")
+                .refersTo("product_id", "products")
                 .done();
 
         b.table("lead_products", "Products a lead is interested in, with quantity.")
@@ -93,6 +115,8 @@ public final class ReadableExportPolicies {
                         "postponed_reminder_acknowledged_for", "migrated_from_new_at", "retired_stage_type",
                         "retired_stage_name", "retired_stage_moved_at", "lead_id", "contact_person", "contact_phone",
                         "contact_email", "created_at", "updated_at")
+                // legacy (see LEGACY_COLUMNS): the stage label of older opportunities
+                .include("sales_stage")
                 .done();
 
         b.table("opportunity_products", "Products on an opportunity, with quantity.")
@@ -114,6 +138,8 @@ public final class ReadableExportPolicies {
         b.table("followups", "Follow-ups: lead/opportunity, employee, activity type, status, dates, remarks.")
                 .include("id", "lead_id", "opportunity_id", "employee_id", "activity_type_id", "status",
                         "scheduled_date", "completed_date", "remarks", "created_at", "updated_at")
+                // legacy (see LEGACY_COLUMNS): the activity label of older follow-ups
+                .include("activity_type", "custom_activity_type")
                 .done();
 
         // ---- history -------------------------------------------------------

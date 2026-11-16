@@ -37,6 +37,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
@@ -92,6 +93,18 @@ class ReadableExportPostgresTest {
             st.execute("DROP SCHEMA public CASCADE");
             st.execute("CREATE SCHEMA public");
             ScriptUtils.executeSqlScript(c, new ClassPathResource("pg-baseline-v1.sql"));
+            // Legacy columns the production database still has: older entity
+            // versions created them and ddl-auto=update never drops columns
+            // (see ReadableExportPolicies.LEGACY_COLUMNS). Without them this
+            // schema was not production-shaped, which is how the deployed
+            // export met 7 columns that no test had seen.
+            st.execute("ALTER TABLE leads ADD COLUMN website VARCHAR(255)");
+            st.execute("ALTER TABLE leads ADD COLUMN interested_product VARCHAR(255)");
+            st.execute("ALTER TABLE leads ADD COLUMN lead_source VARCHAR(255)");
+            st.execute("ALTER TABLE leads ADD COLUMN product_id BIGINT REFERENCES products(id)");
+            st.execute("ALTER TABLE opportunities ADD COLUMN sales_stage VARCHAR(255)");
+            st.execute("ALTER TABLE followups ADD COLUMN activity_type VARCHAR(255)");
+            st.execute("ALTER TABLE followups ADD COLUMN custom_activity_type VARCHAR(255)");
         }
         // the application context (Flyway V2..V20, then Hibernate update) starts after this
     }
@@ -159,6 +172,11 @@ class ReadableExportPostgresTest {
                 + "VALUES (9840, 9810, 9800, 'PENDING', TIMESTAMP '2026-11-20 10:00:00', 'call back')");
         jdbc.execute("INSERT INTO products (id, name, is_active) VALUES (9850, 'UPS 10kVA', true)");
         jdbc.execute("INSERT INTO lead_products (id, lead_id, product_id, quantity) VALUES (9860, 9810, 9850, 3)");
+        // values in the legacy columns, as older versions of the CRM wrote them
+        jdbc.execute("UPDATE leads SET website = 'https://legacy.example', interested_product = 'Genset, UPS', "
+                + "lead_source = 'INDIA_MART', product_id = 9850 WHERE id = 9810");
+        jdbc.execute("UPDATE opportunities SET sales_stage = 'QUOTATION_SENT' WHERE id = 9820");
+        jdbc.execute("UPDATE followups SET activity_type = 'OTHER', custom_activity_type = 'Site survey' WHERE id = 9840");
         jdbc.execute("INSERT INTO whatsapp_consent (phone_e164, status, source, evidence, consented_at, lead_id, created_at, "
                 + "updated_at) VALUES ('919876543210', 'OPTED_IN', 'MANUAL', '" + EVIDENCE + "', now(), 9810, now(), now())");
         jdbc.execute("INSERT INTO email_mailbox_account (employee_id, provider, email_address, provider_subject, "
@@ -219,9 +237,18 @@ class ReadableExportPostgresTest {
                 .containsEntry("description", "Ünïcode 漢字")
                 .containsEntry("created_at", "2026-11-01 09:30:15.250000")
                 .containsEntry("contact_deadline", "2026-12-01")
-                .containsEntry("assigned_employee__name", "Priyā Admin");
+                .containsEntry("assigned_employee__name", "Priyā Admin")
+                // legacy columns: exported as stored, the old product id with its readable name
+                .containsEntry("website", "https://legacy.example")
+                .containsEntry("interested_product", "Genset, UPS")
+                .containsEntry("lead_source", "INDIA_MART")
+                .containsEntry("product_id", "9850")
+                .containsEntry("product__name", "UPS 10kVA");
         Map<String, String> opp = row(csv(files.get(root + "tables/opportunities.csv")), "id", "9820");
-        assertThat(opp).containsEntry("product_value", "1234567.5").containsEntry("lead__company_name", "'=1+2 Industries, \"Pune\"");
+        assertThat(opp).containsEntry("product_value", "1234567.5").containsEntry("lead__company_name", "'=1+2 Industries, \"Pune\"")
+                .containsEntry("sales_stage", "QUOTATION_SENT");
+        assertThat(row(csv(files.get(root + "tables/followups.csv")), "id", "9840"))
+                .containsEntry("activity_type", "OTHER").containsEntry("custom_activity_type", "Site survey");
         assertThat(row(csv(files.get(root + "tables/customers.csv")), "id", "9830"))
                 .containsEntry("gst_number", "27AAAAA0000A1Z5").containsEntry("opportunity__title", "Big Deal");
         assertThat(row(csv(files.get(root + "tables/lead_products.csv")), "id", "9860"))
@@ -235,6 +262,8 @@ class ReadableExportPostgresTest {
         // foreign keys from the PostgreSQL catalog (enforced) and the policy's logical links (not enforced)
         List<List<String>> rel = csv(files.get(root + "relationships.csv"));
         assertThat(rel).anyMatch(r -> r.subList(0, 5).equals(List.of("leads", "assigned_employee_id", "employees", "id", "yes")));
+        // the legacy product link: its database foreign key wins over the policy's logical link
+        assertThat(rel).anyMatch(r -> r.equals(List.of("leads", "product_id", "products", "id", "yes", "product__name")));
         assertThat(rel).anyMatch(r -> r.get(0).equals("whatsapp_consent") && r.get(1).equals("lead_id")
                 && r.get(4).startsWith("no"));
 
@@ -262,5 +291,16 @@ class ReadableExportPostgresTest {
         assertThat(uploaded.get(b.getObjectKey())).hasSize(b.getSizeBytes().intValue());
         // the job's own start was logged to activity_log in between, so at least as many rows
         assertThat(b.getTotalRows()).isGreaterThanOrEqualTo(result.totalRows());
+
+        // ---- a column nobody has reviewed still stops the export ---------------
+        jdbc.execute("ALTER TABLE leads ADD COLUMN unreviewed_note TEXT");
+        Path blocked = dir.resolve("pg-blocked.zip");
+        Files.deleteIfExists(blocked);
+        assertThatThrownBy(() -> exporter.export(blocked, "crm-readable-export-pg-2", 2))
+                .isInstanceOf(BackupFailedException.class)
+                .hasMessageContaining("before anything was written")
+                .hasMessageContaining("1 table(s)/column(s)")
+                .hasMessageContaining("leads.unreviewed_note");
+        assertThat(blocked).doesNotExist();
     }
 }
