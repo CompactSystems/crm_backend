@@ -18,6 +18,7 @@ public class LostReasonController {
     private final LostReasonService service;
 
     @PostMapping
+    @PreAuthorize("hasRole('ADMIN')")
     public LostReason create(
             @Valid @RequestBody LostReasonRequest request) {
 
@@ -40,6 +41,7 @@ public class LostReasonController {
     }
 
     @PutMapping("/{id}")
+    @PreAuthorize("hasRole('ADMIN')")
     public LostReason update(
             @PathVariable Long id,
             @Valid @RequestBody LostReasonRequest request) {

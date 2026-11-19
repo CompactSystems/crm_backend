@@ -18,6 +18,7 @@ public class ProductController {
     private final ProductService service;
 
     @PostMapping
+    @PreAuthorize("hasRole('ADMIN')")
     public Product create(
             @Valid @RequestBody ProductRequest request) {
 
@@ -48,6 +49,7 @@ public class ProductController {
     }
 
     @PutMapping("/{id}")
+    @PreAuthorize("hasRole('ADMIN')")
     public Product update(
             @PathVariable Long id,
             @Valid @RequestBody ProductRequest request) {

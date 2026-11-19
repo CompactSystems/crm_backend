@@ -259,6 +259,37 @@ public class OpportunityController {
                 TableExport.select(EXPORT_COLUMNS, columns, DEFAULT_EXPORT_COLUMNS), opportunities);
     }
 
+    // "Backup Opportunities": ONE workbook (sheet "Opportunities") holding every
+    // opportunity the caller is authorized to see, with every exportable field.
+    // Deliberately takes no filters, paging, selection or column parameters -
+    // none of the list's UI state can narrow it. The RBAC scope and the
+    // OPPORTUNITY_EXPORT permission are still enforced by
+    // OpportunityService.findForExport. Read-only apart from the usual export
+    // audit-log entry.
+    @GetMapping("/backup")
+    public ResponseEntity<byte[]> backupOpportunities() {
+
+        List<Opportunity> opportunities = opportunityService.findForExport(
+                new OpportunitySearchCriteria(), null, null, null, null);
+
+        return TableExport.response("Backup Opportunities", "xlsx", "Opportunities",
+                backupColumns(), opportunities);
+    }
+
+    // Stable column order: reference id first, then every column of the
+    // export catalog (the same fields as the list's column chooser), then
+    // the retirement timestamp.
+    static List<TableExport.Column<Opportunity>> backupColumns() {
+
+        List<TableExport.Column<Opportunity>> columns = new java.util.ArrayList<>();
+
+        columns.add(TableExport.Column.integer("Opportunity ID", Opportunity::getId));
+        columns.addAll(EXPORT_COLUMNS.values());
+        columns.add(TableExport.Column.dateTime("Retired Stage Moved On", Opportunity::getRetiredStageMovedAt));
+
+        return columns;
+    }
+
     private List<Long> parseIds(String ids) {
 
         if (ids == null || ids.isBlank()) {

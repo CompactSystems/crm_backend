@@ -18,6 +18,7 @@ public class IndustryController {
     private final IndustryService service;
 
     @PostMapping
+    @PreAuthorize("hasRole('ADMIN')")
     public Industry create(
             @Valid @RequestBody IndustryRequest request) {
 
@@ -41,6 +42,7 @@ public class IndustryController {
     }
 
     @PutMapping("/{id}")
+    @PreAuthorize("hasRole('ADMIN')")
     public Industry update(
             @PathVariable Long id,
             @Valid @RequestBody IndustryRequest request) {

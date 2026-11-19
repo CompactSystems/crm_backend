@@ -18,6 +18,7 @@ public class BatteryController {
     private final BatteryService service;
 
     @PostMapping
+    @PreAuthorize("hasRole('ADMIN')")
     public Battery create(
             @Valid @RequestBody BatteryRequest request) {
 
@@ -48,6 +49,7 @@ public class BatteryController {
     }
 
     @PutMapping("/{id}")
+    @PreAuthorize("hasRole('ADMIN')")
     public Battery update(
             @PathVariable Long id,
             @Valid @RequestBody BatteryRequest request) {

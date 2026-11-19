@@ -18,6 +18,7 @@ public class LeadSourceMasterController {
     private final LeadSourceMasterService service;
 
     @PostMapping
+    @PreAuthorize("hasRole('ADMIN')")
     public LeadSourceMaster create(@Valid @RequestBody LeadSourceMasterRequest request) {
         return service.create(request);
     }
@@ -39,6 +40,7 @@ public class LeadSourceMasterController {
     }
 
     @PutMapping("/{id}")
+    @PreAuthorize("hasRole('ADMIN')")
     public LeadSourceMaster update(
             @PathVariable Long id,
             @Valid @RequestBody LeadSourceMasterRequest request) {

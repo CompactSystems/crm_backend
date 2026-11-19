@@ -932,4 +932,125 @@ class OpportunityReportingApiTest {
         assertThat(rows.get(1).get(1)).isEqualTo("Yes");
         assertThat(rows.get(2).get(1)).isBlank();
     }
+
+    // ------------------------------------------------- Backup Opportunities
+
+    private org.apache.poi.ss.usermodel.Workbook backupWorkbook(MvcResult result) throws Exception {
+        return org.apache.poi.ss.usermodel.WorkbookFactory.create(
+                new java.io.ByteArrayInputStream(result.getResponse().getContentAsByteArray()));
+    }
+
+    @Test
+    void backupOpportunities_isOneSheetWithEveryOpportunityOfEveryStage_ignoringAnyUiState() throws Exception {
+
+        SalesStage lost = salesStageService.getByType(SalesStageType.LOST);
+        SalesStage postponed = salesStageService.getByType(SalesStageType.POSTPONED);
+        SalesStage dropped = salesStageService.getByType(SalesStageType.LEGACY_DROPPED);
+
+        Opportunity running = storedOpportunity("Backup InProgress", staffA, inProgress, productA, batteryA);
+        storedOpportunity("Backup Won", staffA, won, productB, batteryB);
+        Opportunity lostOpp = storedOpportunity("Backup Lost", staffB, lost, productA, batteryA);
+        storedOpportunity("Backup Postponed", staffB, postponed, productA, batteryA);
+        storedOpportunity("Backup Dropped", admin, dropped, productA, batteryA);
+
+        lostOpp.setLostReason("Price too high");
+        // Awkward text: must stay inert text, never a formula; phone keeps +/leading zeros.
+        running.setContactPerson("=HYPERLINK(\"http://evil.test\",\"x\")");
+        running.setContactPhone("+0044 0123456789");
+        opportunityRepository.save(lostOpp);
+        opportunityRepository.save(running);
+        // An opportunity with nothing optional filled in and no line items.
+        opportunityRepository.save(Opportunity.builder().title("Backup Bare").build());
+        flushAndClear();
+
+        long total = opportunityRepository.count();
+
+        // Filters, paging, selection and columns in the query string are ignored.
+        MvcResult result = mockMvc.perform(get("/api/opportunities/backup")
+                        .param("stageType", "WON").param("search", "nothing-matches")
+                        .param("ids", "1").param("columns", "title").param("page", "3").param("size", "1")
+                        .header("Authorization", adminToken))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Content-Type",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+                .andExpect(header().string("Content-Disposition",
+                        org.hamcrest.Matchers.containsString("Backup%20Opportunities.xlsx")))
+                .andExpect(header().string("X-Export-Row-Count", String.valueOf(total)))
+                .andReturn();
+
+        try (org.apache.poi.ss.usermodel.Workbook wb = backupWorkbook(result)) {
+
+            assertThat(wb.getNumberOfSheets()).isEqualTo(1);
+            org.apache.poi.ss.usermodel.Sheet sheet = wb.getSheetAt(0);
+            assertThat(sheet.getSheetName()).isEqualTo("Opportunities");
+            assertThat(sheet.getLastRowNum()).isEqualTo((int) total); // header + one row each
+
+            List<String> headers = new ArrayList<>();
+            sheet.getRow(0).forEach(c -> headers.add(c.getStringCellValue()));
+            assertThat(headers).contains(
+                    "Opportunity ID", "Company", "Opportunity Title", "Contact Person", "Contact Phone",
+                    "Contact Email", "Products", "Batteries", "Value", "Expected Closing Date", "Stage",
+                    "Sub-Status", "Assigned Employee", "Industry", "City", "State", "Lead Source", "Validity",
+                    "Next Follow-up", "Postponed Review Date", "Postponed Reason", "Lost Reason",
+                    "Previous Stage (retired)", "Created Date", "Last Modified");
+
+            var formatter = new org.apache.poi.ss.usermodel.DataFormatter(java.util.Locale.US);
+            Map<String, org.apache.poi.ss.usermodel.Row> byTitle = new LinkedHashMap<>();
+            int titleCol = headers.indexOf("Opportunity Title");
+
+            for (int r = 1; r <= sheet.getLastRowNum(); r++) {
+                byTitle.put(formatter.formatCellValue(sheet.getRow(r).getCell(titleCol)), sheet.getRow(r));
+            }
+
+            assertThat(byTitle.keySet()).contains("Backup InProgress", "Backup Won", "Backup Lost",
+                    "Backup Postponed", "Backup Dropped", "Backup Bare");
+
+            org.apache.poi.ss.usermodel.Row lostRow = byTitle.get("Backup Lost");
+            assertThat(formatter.formatCellValue(lostRow.getCell(headers.indexOf("Stage")))).isEqualToIgnoringCase("LOST");
+            assertThat(formatter.formatCellValue(lostRow.getCell(headers.indexOf("Lost Reason")))).isEqualTo("Price too high");
+            assertThat(formatter.formatCellValue(lostRow.getCell(headers.indexOf("Assigned Employee")))).isEqualTo("Staff B");
+            assertThat(formatter.formatCellValue(lostRow.getCell(headers.indexOf("Industry")))).isEqualTo("Report Industry");
+            assertThat(formatter.formatCellValue(lostRow.getCell(headers.indexOf("Lead Source")))).isEqualTo("Report Source");
+            assertThat(formatter.formatCellValue(lostRow.getCell(headers.indexOf("Products")))).isEqualTo("Online UPS 10kVA x1");
+            assertThat(formatter.formatCellValue(lostRow.getCell(headers.indexOf("Batteries")))).isEqualTo("SMF 12V 42Ah x1");
+
+            org.apache.poi.ss.usermodel.Row runningRow = byTitle.get("Backup InProgress");
+            var person = runningRow.getCell(headers.indexOf("Contact Person"));
+            assertThat(person.getCellType()).isEqualTo(org.apache.poi.ss.usermodel.CellType.STRING);
+            assertThat(person.getStringCellValue()).startsWith("=HYPERLINK");
+            var phone = runningRow.getCell(headers.indexOf("Contact Phone"));
+            assertThat(phone.getCellType()).isEqualTo(org.apache.poi.ss.usermodel.CellType.STRING);
+            assertThat(phone.getStringCellValue()).isEqualTo("+0044 0123456789");
+        }
+
+        assertThat(opportunityRepository.count()).isEqualTo(total); // read-only
+    }
+
+    @Test
+    void backupOpportunities_neverLeavesTheCallersScope_andNeedsAToken() throws Exception {
+
+        storedOpportunity("Backup Mine", staffB, inProgress, productA, batteryA);
+        storedOpportunity("Backup Theirs", staffA, inProgress, productA, batteryA);
+        flushAndClear();
+
+        MvcResult result = perform(get("/api/opportunities/backup"), staffBToken, 200);
+
+        try (org.apache.poi.ss.usermodel.Workbook wb = backupWorkbook(result)) {
+            var formatter = new org.apache.poi.ss.usermodel.DataFormatter(java.util.Locale.US);
+            List<String> titles = new ArrayList<>();
+            org.apache.poi.ss.usermodel.Sheet sheet = wb.getSheetAt(0);
+            int titleCol = -1;
+            for (org.apache.poi.ss.usermodel.Cell c : sheet.getRow(0)) {
+                if ("Opportunity Title".equals(c.getStringCellValue())) {
+                    titleCol = c.getColumnIndex();
+                }
+            }
+            for (int r = 1; r <= sheet.getLastRowNum(); r++) {
+                titles.add(formatter.formatCellValue(sheet.getRow(r).getCell(titleCol)));
+            }
+            assertThat(titles).contains("Backup Mine").doesNotContain("Backup Theirs");
+        }
+
+        mockMvc.perform(get("/api/opportunities/backup")).andExpect(status().is4xxClientError());
+    }
 }
