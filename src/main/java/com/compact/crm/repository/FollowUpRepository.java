@@ -21,6 +21,12 @@ public interface FollowUpRepository extends JpaRepository<FollowUp, Long>, JpaSp
 
     List<FollowUp> findByOpportunityId(Long opportunityId);
 
+    // Used when an opportunity becomes WON / LOST / DROPPED
+    // (FollowUpService.cancelOutstandingForClosedOpportunity).
+    List<FollowUp> findByOpportunityIdAndStatus(Long opportunityId, com.compact.crm.enums.FollowUpStatus status);
+
+    List<FollowUp> findByLeadIdAndStatus(Long leadId, com.compact.crm.enums.FollowUpStatus status);
+
     boolean existsByEmployeeId(Long employeeId);
 
     // Backs the Dashboard's "Upcoming Follow Ups" widget (see service.

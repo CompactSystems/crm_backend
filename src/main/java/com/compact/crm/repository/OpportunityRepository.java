@@ -5,9 +5,12 @@ import com.compact.crm.entity.Opportunity;
 import com.compact.crm.enums.LeadValidity;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
+
+import jakarta.persistence.LockModeType;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -18,6 +21,14 @@ import java.util.Optional;
 // specification.OpportunitySpecifications, which replace the old
 // hand-written boolean-flag @Query methods that used to live here.
 public interface OpportunityRepository extends JpaRepository<Opportunity, Long>, JpaSpecificationExecutor<Opportunity> {
+
+    // Row lock on one opportunity, taken by FollowUpService.createFollowUp so two
+    // simultaneous identical submissions are serialised and the second one sees
+    // the first one's follow-up (see its duplicate check).
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT o FROM Opportunity o WHERE o.id = :id")
+    Optional<Opportunity> findLockedById(@Param("id") Long id);
+
 
     boolean existsByLeadId(Long leadId);
 

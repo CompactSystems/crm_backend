@@ -182,6 +182,12 @@ public class OpportunityService {
 
         createNextActionFollowUp(saved, nextAction);
 
+        // Converting straight into WON / LOST / DROPPED: the lead's pending
+        // follow-ups (which would otherwise count as this finished
+        // opportunity's next action) are closed - same rule as a later
+        // transition, see cancelOutstandingFollowUpsOnClose.
+        cancelOutstandingFollowUpsOnClose(null, salesStage, saved);
+
         activityLogService.log(
                 currentEmployee,
                 ActivityModule.LEAD, ActivityAction.CONVERT,
@@ -835,6 +841,23 @@ public class OpportunityService {
         return null;
     }
 
+    // The one place the "opportunity became WON / LOST / DROPPED" rule is applied.
+    // Every path that can change an Opportunity's stage on its own authority goes
+    // through it: updateOpportunity (the only edit endpoint) and
+    // convertLeadToOpportunity (a lead converted straight into a closed stage).
+    // returnToInProgress only ever moves to IN PROGRESS, and the startup stage
+    // retirements (LegacyStageRetirement, NewStageRetirement) move opportunities
+    // that were already closed (UNRESPONSIVE / INVALID -> DROPPED / LOST) or into
+    // IN PROGRESS, so neither is a transition into a closed state. It runs inside
+    // the caller's transaction, after the stage is saved: a rejected change never
+    // reaches it, and an exception here rolls the stage change back too.
+    private void cancelOutstandingFollowUpsOnClose(SalesStage previous, SalesStage next, Opportunity saved) {
+
+        if (OpportunityWorkflow.closesOutstandingFollowUps(previous, next)) {
+            followUpService.cancelOutstandingForClosedOpportunity(saved, next.getName());
+        }
+    }
+
     // Creates the follow-up for the supplied next action through the existing
     // FollowUp service (same permission check, history entry and model as a
     // follow-up scheduled from the Follow Ups screen), owned by the
@@ -1073,6 +1096,8 @@ public class OpportunityService {
 
         // Workflow rules validate first (and throw before anything on the
         // entity is touched), then write the stage-dependent fields.
+        SalesStage previousStage = opportunity.getSalesStage();
+
         applyWorkflowRules(opportunity, request, salesStage, false);
 
         applyDetailsEdit(opportunity, details);
@@ -1087,6 +1112,10 @@ public class OpportunityService {
         Opportunity saved = opportunityRepository.save(opportunity);
 
         createNextActionFollowUp(saved, nextAction);
+
+        // Only the transition into WON / LOST / DROPPED closes the pending
+        // follow-ups; a later edit of an already-closed opportunity does not.
+        cancelOutstandingFollowUpsOnClose(previousStage, salesStage, saved);
 
         Employee actor = currentUserService.getCurrentEmployee();
 

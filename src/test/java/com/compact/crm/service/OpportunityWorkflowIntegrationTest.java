@@ -356,7 +356,9 @@ class OpportunityWorkflowIntegrationTest {
         r.setSubStatus(OpportunitySubStatus.QUOTATION_SENT);
         opportunityService.updateOpportunity(o.getId(), r);
 
-        for (String stage : List.of("WON", "POSTPONED")) {
+        // POSTPONED first: moving to WON cancels the pending follow-up, so a later
+        // return to IN PROGRESS would need a fresh next action (not what this checks).
+        for (String stage : List.of("POSTPONED", "WON")) {
 
             // back to in-progress with a sub-status, then away again
             opportunityService.updateOpportunity(o.getId(), r);
@@ -467,7 +469,9 @@ class OpportunityWorkflowIntegrationTest {
         lostReq.setLostReason("No budget");
         opportunityService.updateOpportunity(o.getId(), lostReq);
 
-        Opportunity reopened = opportunityService.updateOpportunity(o.getId(), request("IN PROGRESS", future()));
+        // LOST cancelled the pending follow-up, so reopening needs a fresh next action.
+        Opportunity reopened = opportunityService.updateOpportunity(o.getId(),
+                withNextAction(request("IN PROGRESS", future()), "Call the buyer again", LocalDateTime.now().plusDays(3)));
 
         assertThat(reopened.getLostReason()).isNull();
 

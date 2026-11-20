@@ -9,16 +9,25 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
+import jakarta.persistence.LockModeType;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Optional;
 
 // JpaSpecificationExecutor backs the combinable search/filter/sort list
 // query (see service.LeadService.searchLeads + specification.LeadSpecifications) -
 // it replaces the old hand-written boolean-flag "searchLeads"/
 // "searchLeadsByStatus" @Query methods that used to live here.
 public interface LeadRepository extends JpaRepository<Lead, Long>, JpaSpecificationExecutor<Lead> {
+
+    // Same purpose as OpportunityRepository.findLockedById, for a lead-only follow-up.
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT l FROM Lead l WHERE l.id = :id")
+    Optional<Lead> findLockedById(@Param("id") Long id);
+
 
     boolean existsByPhone(String phone);
 

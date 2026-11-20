@@ -141,8 +141,12 @@ class FollowUpRelationshipsApiTest {
     }
 
     private JsonNode create(Long leadId, Long opportunityId, Employee as) throws Exception {
+        return create(leadId, opportunityId, as, "Call back");
+    }
+
+    private JsonNode create(Long leadId, Long opportunityId, Employee as, String remarks) throws Exception {
         String res = mockMvc.perform(post("/api/followups").header("Authorization", token(as))
-                        .contentType("application/json").content(followUpBody(leadId, opportunityId, as, "Call back")))
+                        .contentType("application/json").content(followUpBody(leadId, opportunityId, as, remarks)))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
         return json.readTree(res);
     }
@@ -233,7 +237,8 @@ class FollowUpRelationshipsApiTest {
         assertThat(onOpportunity.get("related").get("companyName").asText()).isEqualTo("Lotus Textiles");
 
         // naming both is fine when they are the same record
-        JsonNode both = create(lead.getId(), oppId, lakshmi);
+        // (a different next action: an identical pending follow-up is not created twice)
+        JsonNode both = create(lead.getId(), oppId, lakshmi, "Call back about both");
         assertThat(both.get("related").get("kind").asText()).isEqualTo("LEAD_AND_OPPORTUNITY");
     }
 

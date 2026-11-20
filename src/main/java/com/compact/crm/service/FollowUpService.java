@@ -2,6 +2,7 @@ package com.compact.crm.service;
 
 import com.compact.crm.dto.request.FollowUpRequest;
 import com.compact.crm.dto.response.BulkOperationResult;
+import com.compact.crm.dto.response.FollowUpSummaryResponse;
 import com.compact.crm.dto.search.FollowUpSearchCriteria;
 import com.compact.crm.entity.ActivityType;
 import com.compact.crm.entity.Employee;
@@ -124,6 +125,15 @@ public class FollowUpService {
         }
     }
 
+    // Idempotent for an exact repeat: when the same work is already PENDING on the
+    // same record (same opportunity - or lead, for a lead-only follow-up -, date and
+    // time, activity type, assignee and next action), that follow-up is returned
+    // and nothing is created, so a double click or a resubmitted form cannot
+    // leave two identical rows. Follow-ups that differ in any of those are
+    // distinct and are all kept. The parent row is locked for the duration of the
+    // transaction so two simultaneous identical requests are serialised and the
+    // second one sees the first (see isSameScheduledWork / findIdenticalPending).
+    @Transactional
     public FollowUp createFollowUp(FollowUpRequest request) {
 
         if (request.getLeadId() == null && request.getOpportunityId() == null) {
@@ -134,12 +144,15 @@ public class FollowUpService {
         Opportunity opportunity = null;
 
         if (request.getLeadId() != null) {
-            lead = leadRepository.findById(request.getLeadId())
+            // Locked only when the lead is the follow-up's sole parent.
+            lead = (request.getOpportunityId() == null
+                    ? leadRepository.findLockedById(request.getLeadId())
+                    : leadRepository.findById(request.getLeadId()))
                     .orElseThrow(() -> new ResourceNotFoundException("Lead not found"));
         }
 
         if (request.getOpportunityId() != null) {
-            opportunity = opportunityRepository.findById(request.getOpportunityId())
+            opportunity = opportunityRepository.findLockedById(request.getOpportunityId())
                     .orElseThrow(() -> new ResourceNotFoundException("Opportunity not found"));
         }
 
@@ -160,6 +173,17 @@ public class FollowUpService {
         requireSelectableActivityType(activityType, null);
 
         requireNextActionIfOpportunityFollowUp(opportunity, request);
+
+        if (request.getStatus() == FollowUpStatus.PENDING) {
+
+            Optional<FollowUp> existing = findIdenticalPending(
+                    opportunity, lead, activityType.getId(), employee.getId(),
+                    request.getScheduledDate(), request.getRemarks(), null);
+
+            if (existing.isPresent()) {
+                return existing.get();
+            }
+        }
 
         FollowUp followUp = FollowUp.builder()
                 .lead(lead)
@@ -193,6 +217,44 @@ public class FollowUpService {
         Sort sort = SortWhitelist.resolve(sortBy, sortDir, SORT_FIELDS, "scheduledDate");
 
         return followUpRepository.findAll(spec, PageRequest.of(page, size, sort));
+    }
+
+    // Exact counts behind the Follow-ups page's tabs and summary cards. Same
+    // visibility scope, search and filters as the list, but the status filter is
+    // ignored (the counts are per status). Five count queries over the indexed
+    // status / scheduled-date columns; nothing is loaded.
+    public FollowUpSummaryResponse getSummary(FollowUpSearchCriteria criteria) {
+
+        Employee currentEmployee = currentUserService.getCurrentEmployee();
+        List<Long> employeeIds = accessControlService.resolveVisibleEmployeeIds(currentEmployee, FOLLOWUP_VIEW);
+
+        Specification<FollowUp> base = buildSpecification(criteria, employeeIds, false);
+
+        long pending = countWithStatus(base, FollowUpStatus.PENDING);
+        long completed = countWithStatus(base, FollowUpStatus.COMPLETED);
+        long missed = countWithStatus(base, FollowUpStatus.MISSED);
+        long cancelled = countWithStatus(base, FollowUpStatus.CANCELLED);
+
+        LocalDateTime startOfToday = com.compact.crm.util.BusinessClock.startOfToday();
+
+        // Half-open [today 00:00, tomorrow 00:00): an inclusive upper bound such as
+        // 23:59:59.999999999 is rounded up to the next midnight by the PostgreSQL
+        // driver and would count a follow-up scheduled exactly at midnight.
+        long dueToday = followUpRepository.count(SpecificationUtil.and(java.util.Arrays.asList(
+                base,
+                FollowUpSpecifications.hasStatus(List.of(FollowUpStatus.PENDING)),
+                FollowUpSpecifications.scheduledBetween(startOfToday, null),
+                FollowUpSpecifications.scheduledBetween(null, startOfToday.plusDays(1))
+        )));
+
+        return new FollowUpSummaryResponse(pending + completed + missed + cancelled,
+                pending, completed, missed, cancelled, dueToday);
+    }
+
+    private long countWithStatus(Specification<FollowUp> base, FollowUpStatus status) {
+
+        return followUpRepository.count(SpecificationUtil.and(java.util.Arrays.asList(
+                base, FollowUpSpecifications.hasStatus(List.of(status)))));
     }
 
     public List<FollowUp> findForExport(
@@ -280,6 +342,11 @@ public class FollowUpService {
     }
 
     private Specification<FollowUp> buildSpecification(FollowUpSearchCriteria criteria, List<Long> employeeIds) {
+        return buildSpecification(criteria, employeeIds, true);
+    }
+
+    private Specification<FollowUp> buildSpecification(
+            FollowUpSearchCriteria criteria, List<Long> employeeIds, boolean applyStatus) {
 
         LocalDateTime scheduledFrom = criteria.getScheduledFrom() != null
                 ? criteria.getScheduledFrom().atStartOfDay() : null;
@@ -291,7 +358,7 @@ public class FollowUpService {
                 FollowUpSpecifications.fetchAssociations(),
                 FollowUpSpecifications.ownerIn(employeeIds),
                 FollowUpSpecifications.search(criteria.getSearch()),
-                FollowUpSpecifications.hasStatus(criteria.getStatus()),
+                applyStatus ? FollowUpSpecifications.hasStatus(criteria.getStatus()) : null,
                 FollowUpSpecifications.hasActivityTypeId(criteria.getActivityTypeId()),
                 FollowUpSpecifications.hasEmployeeId(criteria.getAssignedEmployeeId()),
                 FollowUpSpecifications.hasLeadId(criteria.getLeadId()),
@@ -365,6 +432,19 @@ public class FollowUpService {
 
         // Decided (and rejected) before anything is changed.
         FollowUpRequest next = justCompleted ? nextAfterCompletion(followUp, lead, opportunity, request) : null;
+
+        // Lock order is opportunity -> lead -> follow-up rows (see
+        // cancelOutstandingForClosedOpportunity). The follow-up row is about to be
+        // modified, and createFollowUp(next) below locks the opportunity: taking
+        // that lock first, before the row is dirtied, stops this edit from holding
+        // the row while waiting for an opportunity lock that a terminal transition
+        // holds while waiting for this very row - a deadlock.
+        Long lockOpportunityId = opportunity != null ? opportunity.getId()
+                : next != null ? next.getOpportunityId() : null;
+
+        if (lockOpportunityId != null) {
+            opportunityRepository.findLockedById(lockOpportunityId);
+        }
 
         followUp.setLead(lead);
         followUp.setOpportunity(opportunity);
@@ -442,11 +522,9 @@ public class FollowUpService {
 
         String remarks = description.trim();
 
-        boolean alreadyScheduled = followUpRepository.findByOpportunityId(target.getId()).stream()
-                .anyMatch(f -> !f.getId().equals(completing.getId())
-                        && f.getStatus() == FollowUpStatus.PENDING
-                        && when.equals(f.getScheduledDate())
-                        && f.getRemarks() != null && remarks.equals(f.getRemarks().trim()));
+        boolean alreadyScheduled = findIdenticalPending(
+                target, null, activityTypeId, request.getEmployeeId(), when, remarks, completing.getId())
+                .isPresent();
 
         if (alreadyScheduled) {
             return null;
@@ -514,6 +592,104 @@ public class FollowUpService {
         followUp.setNextFollowUpNeededOnCompletion(needsNext);
         followUp.setOtherNextFollowUpDate(
                 needsNext ? earliestOtherQualifyingDate(target, followUp.getId()).orElse(null) : null);
+    }
+
+    // The single definition of "the same follow-up", shared by createFollowUp
+    // and nextAfterCompletion: PENDING, same scheduled date and time, same
+    // activity type, same assignee and the same next action (trimmed; blank =
+    // none). `exceptId` excludes the follow-up being completed.
+    private static boolean isSameScheduledWork(
+            FollowUp f, Long activityTypeId, Long employeeId, LocalDateTime when, String remarks, Long exceptId) {
+
+        return f.getStatus() == FollowUpStatus.PENDING
+                && (exceptId == null || !exceptId.equals(f.getId()))
+                && when != null && when.equals(f.getScheduledDate())
+                && f.getActivityType() != null && f.getActivityType().getId().equals(activityTypeId)
+                && f.getEmployee() != null && f.getEmployee().getId().equals(employeeId)
+                && normalizedRemarks(remarks).equals(normalizedRemarks(f.getRemarks()));
+    }
+
+    private static String normalizedRemarks(String remarks) {
+        return remarks == null ? "" : remarks.trim();
+    }
+
+    // Looks among the follow-ups of the opportunity (or, for a lead-only
+    // follow-up, the lead).
+    private Optional<FollowUp> findIdenticalPending(
+            Opportunity opportunity, Lead lead, Long activityTypeId, Long employeeId,
+            LocalDateTime when, String remarks, Long exceptId) {
+
+        List<FollowUp> candidates = opportunity != null
+                ? followUpRepository.findByOpportunityId(opportunity.getId())
+                : followUpRepository.findByLeadId(lead.getId());
+
+        return candidates.stream()
+                .filter(f -> isSameScheduledWork(f, activityTypeId, employeeId, when, remarks, exceptId))
+                .findFirst();
+    }
+
+    // Called when an opportunity moves INTO WON / LOST / DROPPED (see
+    // OpportunityWorkflow.closesOutstandingFollowUps - the caller decides that;
+    // this is not called for a later edit of an already-closed opportunity, so
+    // after-sales follow-ups added afterwards are never touched). Cancels, in the
+    // caller's transaction, every PENDING follow-up of that opportunity and of the
+    // lead it was converted from (the one record that belongs to this sales
+    // process: an opportunity has exactly one lead, and a lead exactly one
+    // opportunity). COMPLETED / MISSED / CANCELLED follow-ups are not touched,
+    // nothing is deleted and completedDate stays empty - the work did not happen.
+    // Safe to repeat: a second call finds no PENDING follow-up. Returns how many
+    // were cancelled; each one gets its own activity-log entry.
+    //
+    // Concurrency: createFollowUp locks its parent row (opportunity, or the lead
+    // for a lead-only follow-up) and then inserts. This method takes the same
+    // locks - opportunity first, then lead - BEFORE it reads the pending
+    // follow-ups, so a create that got there first has committed and is seen (and
+    // cancelled), and one that arrives later waits and is then an ordinary
+    // follow-up on an already-closed opportunity (after-sales). Without the lock
+    // the read could miss an uncommitted insert that then survives as PENDING.
+    // Lock order everywhere: opportunity -> lead -> follow-up rows.
+    @Transactional
+    public int cancelOutstandingForClosedOpportunity(Opportunity opportunity, String stageName) {
+
+        opportunityRepository.findLockedById(opportunity.getId());
+
+        if (opportunity.getLead() != null) {
+            leadRepository.findLockedById(opportunity.getLead().getId());
+        }
+
+        Map<Long, FollowUp> pending = new java.util.LinkedHashMap<>();
+
+        for (FollowUp f : followUpRepository.findByOpportunityIdAndStatus(
+                opportunity.getId(), FollowUpStatus.PENDING)) {
+            pending.put(f.getId(), f);
+        }
+
+        if (opportunity.getLead() != null) {
+
+            for (FollowUp f : followUpRepository.findByLeadIdAndStatus(
+                    opportunity.getLead().getId(), FollowUpStatus.PENDING)) {
+                pending.put(f.getId(), f);
+            }
+        }
+
+        if (pending.isEmpty()) {
+            return 0;
+        }
+
+        Employee actor = currentUserService.getCurrentEmployee();
+
+        for (FollowUp f : pending.values()) {
+
+            f.setStatus(FollowUpStatus.CANCELLED);
+            followUpRepository.save(f);
+
+            activityLogService.logFieldChange(
+                    actor, ActivityModule.FOLLOWUP, f.getId(), followUpEntityName(f),
+                    "Status (cancelled automatically: opportunity moved to " + stageName + ")", "status",
+                    FollowUpStatus.PENDING.name(), FollowUpStatus.CANCELLED.name());
+        }
+
+        return pending.size();
     }
 
     static final String NO_PARENT_MESSAGE = "FollowUp must belong to either a Lead or an Opportunity";

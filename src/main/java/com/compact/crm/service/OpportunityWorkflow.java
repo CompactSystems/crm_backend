@@ -72,6 +72,35 @@ public final class OpportunityWorkflow {
         return requiresNextFollowUp(o.getSalesStage());
     }
 
+    // A stage that means the opportunity is finished: WON, LOST or DROPPED, plus
+    // the retired UNRESPONSIVE / INVALID outcomes that were folded into DROPPED /
+    // LOST (they still exist on historical rows). POSTPONED is NOT terminal, and
+    // neither is a custom (untyped) stage.
+    public static boolean isTerminal(SalesStage stage) {
+
+        SalesStageType type = typeOf(stage);
+
+        return type == SalesStageType.WON
+                || type == SalesStageType.LOST
+                || type == SalesStageType.LEGACY_DROPPED
+                || type == SalesStageType.LEGACY_UNRESPONSIVE
+                || type == SalesStageType.LEGACY_INVALID;
+    }
+
+    // Whether moving an opportunity from `previous` to `next` is the moment its
+    // still-pending follow-ups must be cancelled: it becomes WON / LOST /
+    // DROPPED having not been finished before. `previous` null = a brand-new
+    // opportunity (lead conversion straight into a closed stage). Moving between
+    // two finished stages (LOST -> WON), or saving an already-finished
+    // opportunity again, is not a transition into a terminal state, so new
+    // after-sales follow-ups are never cancelled by a later edit. The retired
+    // stages are not selectable, so only the three main terminal stages qualify
+    // as the target.
+    public static boolean closesOutstandingFollowUps(SalesStage previous, SalesStage next) {
+
+        return isMainStage(next) && isTerminal(next) && !isTerminal(previous);
+    }
+
     // Grouping key used by the reports: the type name for a typed stage (so a
     // renamed WON still counts as WON), CUSTOM for any custom stage.
     public static String key(SalesStage stage) {

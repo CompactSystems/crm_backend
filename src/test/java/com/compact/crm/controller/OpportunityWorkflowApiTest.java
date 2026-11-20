@@ -90,7 +90,7 @@ class OpportunityWorkflowApiTest {
 
         Map<String, Permission> permissions = new HashMap<>();
 
-        for (String code : List.of("LEAD_MANAGE", "LEAD_VIEW", "OPPORTUNITY_MANAGE", "OPPORTUNITY_VIEW", "ACTIVITY_VIEW", "FOLLOWUP_VIEW")) {
+        for (String code : List.of("LEAD_MANAGE", "LEAD_VIEW", "OPPORTUNITY_MANAGE", "OPPORTUNITY_VIEW", "ACTIVITY_VIEW", "FOLLOWUP_VIEW", "FOLLOWUP_MANAGE")) {
 
             Permission p = permissionRepository.findAll().stream()
                     .filter(x -> code.equals(x.getCode())).findFirst()
@@ -215,9 +215,16 @@ class OpportunityWorkflowApiTest {
         // POSTPONED with today's review date -> reminder due; OK keeps the stage; resume changes it.
         String today = BusinessClock.today().toString();
 
+        // LOST cancelled the pending follow-up, so leaving it (to POSTPONED, which also
+        // needs a next follow-up) requires a fresh next action.
+        String freshNextAction = "\"nextActionDescription\":\"Review after budget\","
+                + "\"nextFollowUpDate\":\"" + java.time.LocalDateTime.now().plusDays(5).withNano(0) + "\","
+                + "\"nextActionActivityTypeId\":" + apiActivityType().getId();
+
         mockMvc.perform(put("/api/opportunities/" + id)
                         .header("Authorization", token).contentType("application/json")
-                        .content(body("POSTPONED", future, "\"postponedReviewDate\":\"" + today + "\"")))
+                        .content(body("POSTPONED", future,
+                                "\"postponedReviewDate\":\"" + today + "\"," + freshNextAction)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.postponedReminderDue").value(true))
                 .andExpect(jsonPath("$.lostReason").doesNotExist());

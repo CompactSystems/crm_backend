@@ -3,6 +3,7 @@ package com.compact.crm.controller;
 import com.compact.crm.dto.request.BulkIdsRequest;
 import com.compact.crm.dto.request.FollowUpRequest;
 import com.compact.crm.dto.response.BulkOperationResult;
+import com.compact.crm.dto.response.FollowUpSummaryResponse;
 import com.compact.crm.dto.response.FollowUpTargetResponse;
 import com.compact.crm.dto.search.FollowUpSearchCriteria;
 import com.compact.crm.entity.FollowUp;
@@ -52,6 +53,13 @@ public class FollowUpController {
             @RequestParam(required = false) String sortDir
     ) {
         return followUpService.searchFollowUps(criteria, page, size, sortBy, sortDir);
+    }
+
+    // Exact counts per status for the same search / filters as the list (the
+    // status filter itself is ignored) - see FollowUpService.getSummary.
+    @GetMapping("/summary")
+    public FollowUpSummaryResponse getSummary(@ModelAttribute FollowUpSearchCriteria criteria) {
+        return followUpService.getSummary(criteria);
     }
 
     @GetMapping("/lead/{leadId}")
