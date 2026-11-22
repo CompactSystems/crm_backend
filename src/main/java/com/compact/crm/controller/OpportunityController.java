@@ -16,6 +16,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Arrays;
@@ -265,7 +266,10 @@ public class OpportunityController {
     // none of the list's UI state can narrow it. The RBAC scope and the
     // OPPORTUNITY_EXPORT permission are still enforced by
     // OpportunityService.findForExport. Read-only apart from the usual export
-    // audit-log entry.
+    // audit-log entry. ADMIN only: enforced here (401 without a token, 403 for
+    // MANAGER / EMPLOYEE) on top of the permission checks above - the
+    // frontend hiding the menu item is only a convenience.
+    @PreAuthorize("hasRole('ADMIN')")
     @GetMapping("/backup")
     public ResponseEntity<byte[]> backupOpportunities() {
 

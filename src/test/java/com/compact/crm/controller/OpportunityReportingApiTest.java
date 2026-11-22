@@ -1027,30 +1027,33 @@ class OpportunityReportingApiTest {
     }
 
     @Test
-    void backupOpportunities_neverLeavesTheCallersScope_andNeedsAToken() throws Exception {
+    void backupOpportunities_isAdminOnly_managerEmployeeAndAnonymousAreRefused() throws Exception {
 
         storedOpportunity("Backup Mine", staffB, inProgress, productA, batteryA);
-        storedOpportunity("Backup Theirs", staffA, inProgress, productA, batteryA);
         flushAndClear();
 
-        MvcResult result = perform(get("/api/opportunities/backup"), staffBToken, 200);
-
-        try (org.apache.poi.ss.usermodel.Workbook wb = backupWorkbook(result)) {
-            var formatter = new org.apache.poi.ss.usermodel.DataFormatter(java.util.Locale.US);
-            List<String> titles = new ArrayList<>();
-            org.apache.poi.ss.usermodel.Sheet sheet = wb.getSheetAt(0);
-            int titleCol = -1;
-            for (org.apache.poi.ss.usermodel.Cell c : sheet.getRow(0)) {
-                if ("Opportunity Title".equals(c.getStringCellValue())) {
-                    titleCol = c.getColumnIndex();
-                }
-            }
-            for (int r = 1; r <= sheet.getLastRowNum(); r++) {
-                titles.add(formatter.formatCellValue(sheet.getRow(r).getCell(titleCol)));
-            }
-            assertThat(titles).contains("Backup Mine").doesNotContain("Backup Theirs");
+        Role managerRole = role("MANAGER", 50);
+        for (String code : ALL_PERMISSIONS) {
+            grant(managerRole, code, Scope.OWN);
         }
+        Employee manager = employee("Report Manager", "report-manager@test.com", "9300000004", managerRole);
+        String managerToken = "Bearer " + jwtService.generateToken(new UserPrincipal(manager));
 
-        mockMvc.perform(get("/api/opportunities/backup")).andExpect(status().is4xxClientError());
+        // Both hold OPPORTUNITY_EXPORT (granted in setUp): the role check, not
+        // the permission, is what refuses them.
+        perform(get("/api/opportunities/backup"), managerToken, 403);
+        perform(get("/api/opportunities/backup"), staffBToken, 403);
+        // Query-string tricks do not get around it either.
+        perform(get("/api/opportunities/backup").param("ids", "1").param("format", "csv"), staffBToken, 403);
+
+        mockMvc.perform(get("/api/opportunities/backup")).andExpect(status().isUnauthorized());
+
+        // ADMIN still gets the workbook.
+        perform(get("/api/opportunities/backup"), adminToken, 200);
+
+        // Ordinary export keeps its permission-based behaviour for non-admins.
+        perform(get("/api/opportunities/export"), staffBToken, 200);
+        perform(get("/api/opportunities/export"), managerToken, 200);
+        perform(get("/api/opportunities"), staffBToken, 200);
     }
 }
